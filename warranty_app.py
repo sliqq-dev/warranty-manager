@@ -15,6 +15,7 @@ from tkinter import ttk, messagebox, filedialog, simpledialog
 import sqlite3, shutil
 from datetime import datetime
 from PIL import Image, ImageTk
+from auth import LoginScreen, AdminPanel, Session, init_auth_db
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 if getattr(sys, "frozen", False):
@@ -388,7 +389,7 @@ class App(tk.Tk):
     def _build_sidebar(self):
         sb = self.sidebar
 
-        logo = tk.Frame(sb, bg=SIDEBAR, pady=20)
+        logo = tk.Frame(sb, bg=SIDEBAR, pady=16)
         logo.pack(fill="x", padx=20)
         tk.Label(logo, text="⚙", bg=SIDEBAR, fg=ACCENT,
                  font=("Segoe UI", 18)).pack(side="left")
@@ -399,9 +400,31 @@ class App(tk.Tk):
 
         h_rule(sb, BORDER)
 
+        # User info bar
+        user_bar = tk.Frame(sb, bg=SURFACE, padx=16, pady=10)
+        user_bar.pack(fill="x")
+        tk.Label(user_bar, text="👤", bg=SURFACE, fg=TEXT2,
+                 font=("Segoe UI", 11)).pack(side="left")
+        tk.Label(user_bar, text=f"  {Session.full_name}",
+                 bg=SURFACE, fg=TEXT, font=F_BODY).pack(side="left")
+        role_col = ACCENT if Session.is_admin() else TEXT3
+        tk.Label(user_bar, text=Session.role, bg=SURFACE,
+                 fg=role_col, font=F_SMALL).pack(side="right")
+
+        h_rule(sb, BORDER)
+
         wrap = tk.Frame(sb, bg=SIDEBAR, pady=14, padx=16)
         wrap.pack(fill="x")
         btn(wrap, "+ New Ticket", self._new_ticket, bg=ACCENT).pack(fill="x", ipady=3)
+
+        # Admin panel button (only visible to admins)
+        if Session.is_admin():
+            btn(wrap, "⚙  Admin Panel",
+                lambda: AdminPanel(self),
+                bg=SURFACE2, fg=TEXT2).pack(fill="x", ipady=3, pady=(6,0))
+
+        btn(wrap, "⇤  Logout", self._logout,
+            bg=SURFACE2, fg=TEXT2).pack(fill="x", ipady=3, pady=(4,0))
 
         sf = tk.Frame(sb, bg=SIDEBAR, padx=16)
         sf.pack(fill="x", pady=(4, 0))
@@ -806,6 +829,12 @@ class App(tk.Tk):
             tk.Label(win, text=f"Cannot open:\n{ex}",
                      bg="#000", fg="white").pack(padx=40, pady=40)
 
+    # ── Logout ─────────────────────────────────────────────────────────────────
+    def _logout(self):
+        Session.log("Logout")
+        Session.logout()
+        self.destroy()
+
     # ── CRUD ───────────────────────────────────────────────────────────────────
     def _new_ticket(self):
         def save(data):
@@ -820,6 +849,7 @@ class App(tk.Tk):
             db.commit()
             wid = db.execute("SELECT last_insert_rowid()").fetchone()[0]
             db.close()
+            Session.log("Created ticket", data["title"])
             self._active_id = wid
             self.refresh_list(); self.open_detail(wid)
         TicketForm(self, "New Ticket", on_save=save)
@@ -836,14 +866,17 @@ class App(tk.Tk):
                  data["serial_no"], data["priority"], data["description"],
                  now_str(), wid))
             db2.commit(); db2.close()
+            Session.log("Edited ticket", data["title"])
             self.refresh_list(); self.open_detail(wid)
         TicketForm(self, "Edit Ticket", prefill=dict(row), on_save=save)
 
     def _set_status(self, wid, status):
-        db = get_db()
+        db  = get_db()
+        row = db.execute("SELECT ticket_no FROM warranties WHERE id=?", (wid,)).fetchone()
         db.execute("UPDATE warranties SET status=?,updated_at=? WHERE id=?",
                    (status, now_str(), wid))
         db.commit(); db.close()
+        Session.log("Status change", f"{row['ticket_no']} -> {status}")
         self.refresh_list(); self.open_detail(wid)
 
     def _delete_ticket(self, wid):
@@ -852,7 +885,8 @@ class App(tk.Tk):
                 "Permanently delete this ticket and all its data?\nThis cannot be undone.",
                 parent=self, icon="warning"):
             return
-        db = get_db()
+        db  = get_db()
+        row = db.execute("SELECT ticket_no FROM warranties WHERE id=?", (wid,)).fetchone()
         for ph in db.execute(
                 "SELECT filename FROM photos WHERE warranty_id=?", (wid,)).fetchall():
             try: os.remove(os.path.join(PHOTOS_DIR, ph["filename"]))
@@ -861,15 +895,23 @@ class App(tk.Tk):
         db.execute("DELETE FROM notes  WHERE warranty_id=?", (wid,))
         db.execute("DELETE FROM warranties WHERE id=?", (wid,))
         db.commit(); db.close()
+        Session.log("Deleted ticket", row["ticket_no"])
         self._active_id = None
         self.refresh_list(); self._show_empty()
 
 # ── Entry ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Show splash + auto-update check before launching main app
     from updater import check_and_update
     check_and_update()
 
-    # Launch main app
-    app = App()
-    app.mainloop()
+    # Login loop — keeps showing login screen after logout
+    while True:
+        login = LoginScreen()
+        login.mainloop()
+        if not login.success:
+            break
+        app = App()
+        app.mainloop()
+        # If session was cleared (logout), loop back to login
+        if Session.username is not None:
+            break
